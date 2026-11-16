@@ -159,7 +159,9 @@ async function readResponse(response, operation) {
   try {
     body = await response.json();
   } catch {
-    throw new TypeError("Core " + operation + " response returned invalid JSON");
+    if (response.ok) {
+      throw new TypeError("Core " + operation + " response returned invalid JSON");
+    }
   }
   if (!response.ok) {
     const error = new Error(typeof body?.error?.message === "string" ? body.error.message : "Core commerce request failed");
