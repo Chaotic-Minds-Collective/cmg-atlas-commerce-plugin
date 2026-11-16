@@ -46,4 +46,4 @@ Core owns wallet, orders, payments, entitlements and reward jobs. Commerce owns 
 - Do not deploy to production or change live server configuration during repository planning.
 
 ## Current readiness
-The read-only Core API client for catalogue, entitlements and order history is implemented with nine unit tests. No wallet endpoint exists in Core, and checkout, payment, reward claiming and ATLAS item delivery remain unimplemented. No production deployment is implied.
+The read-only Core API client for catalogue, entitlements and order history is implemented with ten unit tests. No wallet endpoint exists in Core, and checkout, payment, reward claiming and ATLAS item delivery remain unimplemented. No production deployment is implied.
