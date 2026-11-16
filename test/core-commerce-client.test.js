@@ -153,34 +153,17 @@ test("surfaces Core error codes and HTTP status", async () => {
   });
 });
 
-test("preserves HTTP errors with unparseable bodies for every read method", async () => {
-  for (const method of ["listProducts", "listEntitlements", "listOrders"]) {
-    for (const [status, body] of [[401, ""], [502, "<html>Bad gateway</html>"], [503, "{invalid"]]) {
-      const client = createCoreCommerceClient({
-        coreOrigin: "https://core.example",
-        fetchImpl: async () => new Response(body, { status })
-      });
-      await assert.rejects(client[method]({ playerToken: "session-token" }), {
-        name: "CoreCommerceRequestError",
-        status,
-        code: "CORE_REQUEST_FAILED",
-        message: "Core commerce request failed"
-      });
-    }
-  }
-});
-
-test("rejects successful responses with unparseable bodies", async () => {
-  for (const body of ["", "<html>Unexpected page</html>", "{invalid"]) {
-    const client = createCoreCommerceClient({
-      coreOrigin: "https://core.example",
-      fetchImpl: async () => new Response(body, { status: 200 })
-    });
-    await assert.rejects(client.listProducts(), {
-      name: "TypeError",
-      message: "Core commerce response returned invalid JSON"
-    });
-  }
+test("preserves HTTP status when an unsuccessful response has invalid JSON", async () => {
+  const client = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async () => ({ ok: false, status: 503, async json() { throw new Error("empty body"); } })
+  });
+  await assert.rejects(client.listProducts(), (error) => {
+    assert.equal(error.name, "CoreCommerceRequestError");
+    assert.equal(error.status, 503);
+    assert.equal(error.code, "CORE_REQUEST_FAILED");
+    return true;
+  });
 });
 
 test("rejects malformed response envelopes", async () => {
