@@ -1,27 +1,34 @@
 # CMG Commerce
 
-A Chaotic Minds Gaming-branded multi-grid economy and shop with durable entitlements and reward delivery.
+A Chaotic Minds Gaming-branded multi-grid economy and shop built on Chaotic Minds Gaming Core. This repository now contains the first read-only Core integration slice.
 
-This Chaotic Minds Gaming-specific module extends [Chaotic Minds Gaming Core](https://github.com/Chaotic-Minds-Collective/cmg-atlas-core-plugin) and the [ATLAS integration adapter](https://github.com/Chaotic-Minds-Collective/cmg-atlas-plugin); it does not replace either foundation.
+## Implemented
 
-## Feature scope
-- Original CMG shop catalogue and purchase history
-- Cluster wallet ledger with idempotent transactions
-- Kits, items, services, cosmetics, tame-color tokens and loot boxes
-- Vote, playtime, daily, event and community rewards
-- VIP entitlements and grid-specific delivery
-- Refund/revocation and failed-delivery reconciliation
+- `listProducts({ currency })` reads Core's public, active product catalogue.
+- `listEntitlements({ playerToken })` reads the authenticated player's entitlements and delivery targets.
+- `listOrders({ playerToken })` reads the authenticated player's order history.
+- Minor-unit money values remain decimal strings to avoid JavaScript floating-point precision loss.
+- Player session tokens are supplied per account-read call and are not retained by the client.
+- HTTPS-only origin validation, redirect rejection, bounded request timeouts, response validation, and injectable `fetch` for tests.
 
-## Architecture and dependencies
-- Core commerce, orders, entitlements, payment integration and reward queue
-- ATLAS adapter: player resolution and item grants
-- Sentinel for audit; Connect for announcements
-- Tribes for optional group rewards
+## Explicitly not implemented yet
 
-Core remains authoritative for shared identity, authorization and platform records. ATLAS-native calls pass through the shared adapter. This module owns its domain state and must not connect directly to PostgreSQL.
+- **Wallet display:** Core currently has no wallet-balance or wallet-ledger read endpoint. This module does not invent one or query Core's database directly.
+- Checkout/order creation, payment processing, reward claims, item grants, loot boxes, and refunds remain out of scope for this read-only slice.
+- No payment keys, production credentials, or game-server configuration are used.
 
-## Implementation plan
-See [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) for data ownership, milestones and technical gates.
+Core remains authoritative for products, orders, entitlements, payments and reward jobs. Commerce must not connect directly to PostgreSQL. Actual ATLAS item delivery remains gated on isolated adapter validation.
 
-## Readiness
-Planning scaffold only. Native ATLAS compatibility and feature-specific callbacks are not yet verified on an isolated server. No production deployment is implied.
+## Development
+
+Requires Node.js 22 or later.
+
+```bash
+npm ci
+npm run check
+npm test
+```
+
+The tests use a fake Fetch implementation; they do not call a live Core instance.
+
+See [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) for the remaining delivery gates.

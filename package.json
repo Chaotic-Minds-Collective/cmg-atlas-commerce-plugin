@@ -1,0 +1,17 @@
+{
+  "name": "@chaotic-minds-gaming/atlas-commerce",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Read-only Core catalogue, entitlement and order-history client for CMG ATLAS Commerce.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "node --check src/core-commerce-client.js && node --check test/core-commerce-client.test.js",
+    "test": "node --test"
+  },
+  "exports": {
+    ".": "./src/core-commerce-client.js"
+  }
+}
