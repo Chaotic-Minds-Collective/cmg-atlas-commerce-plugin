@@ -372,3 +372,20 @@ test("preserves Core's checkout-disabled error without suggesting a payment was 
     return true;
   });
 });
+
+
+test("rejects a live Stripe checkout session ID even when the URL host is trusted", async () => {
+  const client = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async () => response({
+      checkoutUrl: "https://checkout.stripe.com/c/pay/cs_live_123",
+      sessionId: "cs_live_123",
+      expiresAt: "2026-11-17T01:00:00.000Z"
+    })
+  });
+  await assert.rejects(client.createCheckoutSession({
+    playerToken: "player-token",
+    orderId: ORDER_ID,
+    idempotencyKey: "checkout-request-001"
+  }), /Stripe test checkout session/);
+});

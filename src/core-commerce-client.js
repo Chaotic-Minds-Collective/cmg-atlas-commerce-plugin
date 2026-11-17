@@ -223,9 +223,13 @@ function validateCheckoutSession(data) {
   if (expiresAt !== null && (typeof expiresAt !== "string" || Number.isNaN(Date.parse(expiresAt)))) {
     throw new TypeError("expiresAt must be a valid date string or null");
   }
+  const sessionId = requiredString(data.sessionId, "sessionId");
+  if (!sessionId.startsWith("cs_test_")) {
+    throw new TypeError("sessionId must identify a Stripe test checkout session");
+  }
   return deepFreeze({
     checkoutUrl: url.toString(),
-    sessionId: requiredString(data.sessionId, "sessionId"),
+    sessionId,
     expiresAt
   });
 }
