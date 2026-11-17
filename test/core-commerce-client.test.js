@@ -173,3 +173,219 @@ test("rejects malformed response envelopes", async () => {
   });
   await assert.rejects(client.listProducts(), /data must be an array/);
 });
+
+
+const DELIVERY_ID = "55555555-5555-4555-8555-555555555555";
+const STEAM_ID = "76561198000000000";
+
+function delivery(overrides = {}) {
+  return {
+    id: DELIVERY_ID,
+    gameKey: "atlas",
+    serverId: SERVER_ID,
+    targetExternalId: STEAM_ID,
+    deliveryPayload: { deliveryType: "item", productSku: "VIP-30D", quantity: 1 },
+    status: "pending",
+    createdAt: "2026-11-17T00:00:00.000Z",
+    ...overrides
+  };
+}
+
+test("creates an idempotent Core order with validated items and per-request credentials", async () => {
+  let captured;
+  const client = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async (url, options) => {
+      captured = { url, options };
+      return response({
+        orderId: ORDER_ID,
+        status: "pending",
+        currency: "USD",
+        totalMinor: "2598",
+        reused: false
+      }, { status: 201 });
+    }
+  });
+
+  const order = await client.createOrder({
+    playerToken: "player-session-token",
+    idempotencyKey: "order-request-001",
+    currency: "usd",
+    items: [{ productId: PRODUCT_ID, quantity: 2 }]
+  });
+
+  assert.equal(captured.url, "https://core.example/commerce/orders");
+  assert.equal(captured.options.method, "POST");
+  assert.equal(captured.options.headers.authorization, "Bearer player-session-token");
+  assert.equal(captured.options.headers["idempotency-key"], "order-request-001");
+  assert.equal(captured.options.headers["content-type"], "application/json");
+  assert.deepEqual(JSON.parse(captured.options.body), {
+    currency: "USD",
+    items: [{ productId: PRODUCT_ID, quantity: 2 }]
+  });
+  assert.equal(order.orderId, ORDER_ID);
+  assert.equal(order.totalMinor, "2598");
+  assert.equal(order.reused, false);
+  assert.equal(Object.isFrozen(order), true);
+});
+
+test("rejects invalid order items and idempotency keys before making a request", async () => {
+  let calls = 0;
+  const client = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async () => { calls += 1; return response({}); }
+  });
+  const base = { playerToken: "player-token", idempotencyKey: "order-request-001" };
+
+  await assert.rejects(client.createOrder({ ...base, idempotencyKey: "short", items: [{ productId: PRODUCT_ID, quantity: 1 }] }), /between 8 and 128/);
+  await assert.rejects(client.createOrder({ ...base, items: [] }), /between 1 and 20/);
+  await assert.rejects(client.createOrder({ ...base, items: [{ productId: "not-a-uuid", quantity: 1 }] }), /must be a UUID/);
+  await assert.rejects(client.createOrder({ ...base, items: [{ productId: PRODUCT_ID, quantity: 11 }] }), /between 1 and 10/);
+  assert.equal(calls, 0);
+});
+
+test("reads the Core checkout capability without sending player credentials", async () => {
+  let captured;
+  const client = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async (url, options) => {
+      captured = { url, options };
+      return response({ enabled: true, provider: "stripe", mode: "test" });
+    }
+  });
+
+  const status = await client.getCheckoutStatus();
+  assert.equal(captured.url, "https://core.example/commerce/checkout/status");
+  assert.equal(captured.options.method, "GET");
+  assert.deepEqual(captured.options.headers, { accept: "application/json" });
+  assert.deepEqual(status, { enabled: true, provider: "stripe", mode: "test" });
+});
+
+test("rejects a checkout capability response that advertises live or unknown payment mode", async () => {
+  const client = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async () => response({ enabled: true, provider: "stripe", mode: "live" })
+  });
+  await assert.rejects(client.getCheckoutStatus(), /Stripe test mode/);
+});
+
+test("creates a Stripe test checkout session with a separate idempotency key", async () => {
+  let captured;
+  const client = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async (url, options) => {
+      captured = { url, options };
+      return response({
+        checkoutUrl: "https://checkout.stripe.com/c/pay/cs_test_123",
+        sessionId: "cs_test_123",
+        expiresAt: "2026-11-17T01:00:00.000Z"
+      }, { status: 201 });
+    }
+  });
+
+  const session = await client.createCheckoutSession({
+    playerToken: "player-session-token",
+    orderId: ORDER_ID,
+    idempotencyKey: "checkout-request-001"
+  });
+  assert.equal(captured.url, "https://core.example/commerce/orders/" + ORDER_ID + "/checkout");
+  assert.equal(captured.options.method, "POST");
+  assert.equal(captured.options.headers.authorization, "Bearer player-session-token");
+  assert.equal(captured.options.headers["idempotency-key"], "checkout-request-001");
+  assert.equal(captured.options.body, undefined);
+  assert.equal(session.sessionId, "cs_test_123");
+  assert.equal(session.checkoutUrl, "https://checkout.stripe.com/c/pay/cs_test_123");
+  assert.equal(Object.isFrozen(session), true);
+});
+
+test("rejects checkout URLs outside the trusted Stripe HTTPS host", async () => {
+  const client = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async () => response({
+      checkoutUrl: "https://checkout.evil.example/c/pay/cs_test_123",
+      sessionId: "cs_test_123",
+      expiresAt: "2026-11-17T01:00:00.000Z"
+    })
+  });
+  await assert.rejects(client.createCheckoutSession({
+    playerToken: "player-token",
+    orderId: ORDER_ID,
+    idempotencyKey: "checkout-request-001"
+  }), /trusted Stripe HTTPS checkout host/);
+});
+
+test("queues an entitlement delivery claim and returns pending delivery records", async () => {
+  let captured;
+  const client = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async (url, options) => {
+      captured = { url, options };
+      return response({ entitlementId: ENTITLEMENT_ID, deliveries: [delivery()] }, { status: 202 });
+    }
+  });
+
+  const claim = await client.claimEntitlement({
+    playerToken: "player-session-token",
+    entitlementId: ENTITLEMENT_ID
+  });
+  assert.equal(captured.url, "https://core.example/account/entitlements/" + ENTITLEMENT_ID + "/claim");
+  assert.equal(captured.options.method, "POST");
+  assert.equal(captured.options.headers.authorization, "Bearer player-session-token");
+  assert.equal(captured.options.headers["idempotency-key"], undefined);
+  assert.equal(captured.options.body, undefined);
+  assert.equal(claim.deliveries[0].status, "pending");
+  assert.equal(claim.deliveries[0].targetExternalId, STEAM_ID);
+  assert.equal(Object.isFrozen(claim.deliveries[0].deliveryPayload), true);
+});
+
+test("rejects claim responses with mismatched entitlement IDs or malformed deliveries", async () => {
+  const mismatched = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async () => response({ entitlementId: ORDER_ID, deliveries: [] }, { status: 202 })
+  });
+  await assert.rejects(mismatched.claimEntitlement({ playerToken: "player-token", entitlementId: ENTITLEMENT_ID }), /different entitlement ID/);
+
+  const malformed = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async () => response({ entitlementId: ENTITLEMENT_ID, deliveries: [delivery({ deliveryPayload: null })] }, { status: 202 })
+  });
+  await assert.rejects(malformed.claimEntitlement({ playerToken: "player-token", entitlementId: ENTITLEMENT_ID }), /deliveryPayload must be an object/);
+});
+
+test("preserves Core's checkout-disabled error without suggesting a payment was taken", async () => {
+  const client = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async () => response(null, {
+      ok: false,
+      status: 503,
+      body: { error: { code: "CHECKOUT_DISABLED", message: "Test-mode checkout is not configured." } }
+    })
+  });
+  await assert.rejects(client.createCheckoutSession({
+    playerToken: "player-token",
+    orderId: ORDER_ID,
+    idempotencyKey: "checkout-request-001"
+  }), (error) => {
+    assert.equal(error.name, "CoreCommerceRequestError");
+    assert.equal(error.status, 503);
+    assert.equal(error.code, "CHECKOUT_DISABLED");
+    return true;
+  });
+});
+
+
+test("rejects a live Stripe checkout session ID even when the URL host is trusted", async () => {
+  const client = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async () => response({
+      checkoutUrl: "https://checkout.stripe.com/c/pay/cs_live_123",
+      sessionId: "cs_live_123",
+      expiresAt: "2026-11-17T01:00:00.000Z"
+    })
+  });
+  await assert.rejects(client.createCheckoutSession({
+    playerToken: "player-token",
+    orderId: ORDER_ID,
+    idempotencyKey: "checkout-request-001"
+  }), /Stripe test checkout session/);
+});

@@ -36,8 +36,16 @@ function validateCurrency(value) {
   return currency;
 }
 
+function validateIdempotencyKey(value) {
+  const key = requiredString(value, "idempotencyKey");
+  if (key.length < 8 || key.length > 128) {
+    throw new TypeError("idempotencyKey must contain between 8 and 128 characters");
+  }
+  return key;
+}
+
 function validateMinorAmount(value, field) {
-  if (typeof value === "string" && /^\d+$/.test(value)) return value;
+  if (typeof value === "string" && /^[0-9]+$/.test(value)) return value;
   if (Number.isSafeInteger(value) && value >= 0) return String(value);
   throw new TypeError(field + " must be a non-negative integer or decimal integer string");
 }
@@ -150,6 +158,117 @@ function validateOrder(item, index) {
   });
 }
 
+function validateOrderItems(items) {
+  if (!Array.isArray(items) || items.length < 1 || items.length > 20) {
+    throw new TypeError("items must contain between 1 and 20 products");
+  }
+  return Object.freeze(items.map((item, index) => {
+    const field = "items[" + index + "]";
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new TypeError(field + " must be an object");
+    }
+    if (!Number.isSafeInteger(item.quantity) || item.quantity < 1 || item.quantity > 10) {
+      throw new TypeError(field + ".quantity must be an integer between 1 and 10");
+    }
+    return deepFreeze({
+      productId: validateUuid(item.productId, field + ".productId"),
+      quantity: item.quantity
+    });
+  }));
+}
+
+function validateCreatedOrder(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new TypeError("Core order creation data must be an object");
+  }
+  if (data.reused !== undefined && typeof data.reused !== "boolean") {
+    throw new TypeError("Core order creation reused flag must be a boolean");
+  }
+  const result = {
+    orderId: validateUuid(data.orderId, "orderId"),
+    status: requiredString(data.status, "order status")
+  };
+  if (data.currency !== undefined) result.currency = validateCurrency(data.currency);
+  if (data.totalMinor !== undefined) result.totalMinor = validateMinorAmount(data.totalMinor, "totalMinor");
+  if (data.reused !== undefined) result.reused = data.reused;
+  return deepFreeze(result);
+}
+
+function validateCheckoutStatus(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new TypeError("Core checkout status data must be an object");
+  }
+  if (typeof data.enabled !== "boolean") throw new TypeError("Core checkout status enabled must be a boolean");
+  if (data.provider !== "stripe" || data.mode !== "test") {
+    throw new TypeError("Core checkout status must identify Stripe test mode");
+  }
+  return deepFreeze({ enabled: data.enabled, provider: data.provider, mode: data.mode });
+}
+
+function validateCheckoutSession(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new TypeError("Core checkout session data must be an object");
+  }
+  const checkoutUrl = requiredString(data.checkoutUrl, "checkoutUrl");
+  let url;
+  try {
+    url = new URL(checkoutUrl);
+  } catch {
+    throw new TypeError("checkoutUrl must be a valid Stripe HTTPS checkout URL");
+  }
+  if (url.protocol !== "https:" || url.hostname !== "checkout.stripe.com" || url.username || url.password || url.hash) {
+    throw new TypeError("checkoutUrl must use the trusted Stripe HTTPS checkout host");
+  }
+  const expiresAt = data.expiresAt;
+  if (expiresAt !== null && (typeof expiresAt !== "string" || Number.isNaN(Date.parse(expiresAt)))) {
+    throw new TypeError("expiresAt must be a valid date string or null");
+  }
+  const sessionId = requiredString(data.sessionId, "sessionId");
+  if (!sessionId.startsWith("cs_test_")) {
+    throw new TypeError("sessionId must identify a Stripe test checkout session");
+  }
+  return deepFreeze({
+    checkoutUrl: url.toString(),
+    sessionId,
+    expiresAt
+  });
+}
+
+function validateRewardDelivery(item, index) {
+  const field = "deliveries[" + index + "]";
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    throw new TypeError(field + " must be an object");
+  }
+  const serverId = item.serverId === null ? null : validateUuid(item.serverId, field + ".serverId");
+  if (!item.deliveryPayload || typeof item.deliveryPayload !== "object" || Array.isArray(item.deliveryPayload)) {
+    throw new TypeError(field + ".deliveryPayload must be an object");
+  }
+  return deepFreeze({
+    id: validateUuid(item.id, field + ".id"),
+    gameKey: requiredString(item.gameKey, field + ".gameKey"),
+    serverId,
+    targetExternalId: requiredString(item.targetExternalId, field + ".targetExternalId"),
+    deliveryPayload: item.deliveryPayload,
+    status: requiredString(item.status, field + ".status"),
+    createdAt: requiredString(item.createdAt, field + ".createdAt")
+  });
+}
+
+function validateEntitlementClaim(data, requestedEntitlementId) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new TypeError("Core entitlement claim data must be an object");
+  }
+  const entitlementId = validateUuid(data.entitlementId, "entitlementId");
+  if (entitlementId !== requestedEntitlementId) {
+    throw new TypeError("Core entitlement claim returned a different entitlement ID");
+  }
+  if (!Array.isArray(data.deliveries)) throw new TypeError("Core entitlement claim deliveries must be an array");
+  return deepFreeze({
+    entitlementId,
+    deliveries: Object.freeze(data.deliveries.map(validateRewardDelivery))
+  });
+}
+
 async function readResponse(response, operation) {
   if (!response || typeof response !== "object" ||
       typeof response.ok !== "boolean" || typeof response.status !== "number") {
@@ -182,9 +301,9 @@ async function readResponse(response, operation) {
 }
 
 /**
- * Create a read-only client for Core's public catalogue and player account views.
- * Player credentials are supplied per call and are never retained by the client.
- * This client does not create orders, claim rewards, spend currency, or process payments.
+ * Create a player-facing client for Core's catalogue, account views, order creation,
+ * test-mode checkout, and entitlement delivery claims. Player credentials are supplied
+ * per call and are never retained. Core remains authoritative for payments and rewards.
  */
 export function createCoreCommerceClient({
   coreOrigin,
@@ -197,50 +316,109 @@ export function createCoreCommerceClient({
     throw new RangeError("timeoutMs must be an integer between 100 and 30000");
   }
 
-  async function request(path, { playerToken } = {}) {
+  async function request(path, { playerToken, method = "GET", body, idempotencyKey, operation = "commerce" } = {}) {
+    if (method !== "GET" && method !== "POST") throw new TypeError("Core commerce method must be GET or POST");
     const headers = { accept: "application/json" };
     if (playerToken !== undefined) headers.authorization = "Bearer " + requiredString(playerToken, "playerToken");
+    if (idempotencyKey !== undefined) headers["idempotency-key"] = validateIdempotencyKey(idempotencyKey);
+    const init = {
+      method,
+      headers,
+      redirect: "error",
+      cache: "no-store",
+      signal: AbortSignal.timeout(timeoutMs)
+    };
+    if (body !== undefined) {
+      headers["content-type"] = "application/json";
+      init.body = JSON.stringify(body);
+    }
     let response;
     try {
-      response = await fetchImpl(origin + path, {
-        method: "GET",
-        headers,
-        redirect: "error",
-        cache: "no-store",
-        signal: AbortSignal.timeout(timeoutMs)
-      });
+      response = await fetchImpl(origin + path, init);
     } catch (error) {
       const failure = new Error("Core commerce request failed");
       failure.cause = error;
       throw failure;
     }
-    return readResponse(response, "commerce");
+    return readResponse(response, operation);
   }
 
   async function listProducts({ currency = "USD" } = {}) {
     const normalizedCurrency = validateCurrency(currency);
     const url = new URL("/catalog/products", origin);
     url.searchParams.set("currency", normalizedCurrency);
-    const data = await request(url.pathname + url.search);
+    const data = await request(url.pathname + url.search, { operation: "product catalogue" });
     if (!Array.isArray(data)) throw new TypeError("Core product catalogue data must be an array");
     return Object.freeze(data.map((item, index) => validateProduct(item, index, normalizedCurrency)));
   }
 
   async function listEntitlements({ playerToken } = {}) {
     requiredString(playerToken, "playerToken");
-    const data = await request("/account/entitlements", { playerToken });
+    const data = await request("/account/entitlements", { playerToken, operation: "entitlement list" });
     if (!Array.isArray(data)) throw new TypeError("Core entitlement data must be an array");
     return Object.freeze(data.map(validateEntitlement));
   }
 
   async function listOrders({ playerToken } = {}) {
     requiredString(playerToken, "playerToken");
-    const data = await request("/account/orders", { playerToken });
+    const data = await request("/account/orders", { playerToken, operation: "order history" });
     if (!Array.isArray(data)) throw new TypeError("Core order history data must be an array");
     return Object.freeze(data.map(validateOrder));
   }
 
-  return Object.freeze({ listProducts, listEntitlements, listOrders });
+  async function createOrder({ playerToken, idempotencyKey, currency = "USD", items } = {}) {
+    requiredString(playerToken, "playerToken");
+    const payload = {
+      currency: validateCurrency(currency),
+      items: validateOrderItems(items)
+    };
+    const data = await request("/commerce/orders", {
+      playerToken,
+      method: "POST",
+      idempotencyKey,
+      body: payload,
+      operation: "order creation"
+    });
+    return validateCreatedOrder(data);
+  }
+
+  async function getCheckoutStatus() {
+    const data = await request("/commerce/checkout/status", { operation: "checkout status" });
+    return validateCheckoutStatus(data);
+  }
+
+  async function createCheckoutSession({ playerToken, orderId, idempotencyKey } = {}) {
+    requiredString(playerToken, "playerToken");
+    const normalizedOrderId = validateUuid(orderId, "orderId");
+    const data = await request("/commerce/orders/" + encodeURIComponent(normalizedOrderId) + "/checkout", {
+      playerToken,
+      method: "POST",
+      idempotencyKey,
+      operation: "checkout session"
+    });
+    return validateCheckoutSession(data);
+  }
+
+  async function claimEntitlement({ playerToken, entitlementId } = {}) {
+    requiredString(playerToken, "playerToken");
+    const normalizedEntitlementId = validateUuid(entitlementId, "entitlementId");
+    const data = await request("/account/entitlements/" + encodeURIComponent(normalizedEntitlementId) + "/claim", {
+      playerToken,
+      method: "POST",
+      operation: "entitlement claim"
+    });
+    return validateEntitlementClaim(data, normalizedEntitlementId);
+  }
+
+  return Object.freeze({
+    listProducts,
+    listEntitlements,
+    listOrders,
+    createOrder,
+    getCheckoutStatus,
+    createCheckoutSession,
+    claimEntitlement
+  });
 }
 
 export const CORE_COMMERCE_DEFAULTS = Object.freeze({
