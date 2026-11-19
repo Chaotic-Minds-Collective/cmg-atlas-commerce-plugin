@@ -313,7 +313,7 @@ function validateWalletPayment(data, requestedOrderId) {
     throw new TypeError("Core wallet payment data must be an object");
   }
   const orderId = validateUuid(data.orderId, "orderId");
-  if (orderId !== requestedOrderId) throw new TypeError("Core wallet payment returned a different order ID");
+  if (orderId.toLowerCase() !== requestedOrderId.toLowerCase()) throw new TypeError("Core wallet payment returned a different order ID");
   if (data.status !== "paid") throw new TypeError("Core wallet payment status must be paid");
   if (data.provider !== "wallet") throw new TypeError("Core wallet payment provider must be wallet");
   if (typeof data.reused !== "boolean") throw new TypeError("Core wallet payment reused flag must be a boolean");
