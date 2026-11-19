@@ -543,3 +543,38 @@ test("surfaces insufficient wallet balance as a typed Core commerce error", asyn
     return true;
   });
 });
+
+
+test("accepts UUID case differences when matching the wallet payment response", async () => {
+  const letteredOrderId = "abcdef12-3456-4abc-8def-abcdef123456";
+  const client = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async () => response({
+      orderId: letteredOrderId,
+      status: "paid",
+      provider: "wallet",
+      balanceMinor: "300",
+      reused: false
+    })
+  });
+  const payment = await client.payOrderWithWallet({
+    playerToken: "player-token",
+    orderId: letteredOrderId.toUpperCase()
+  });
+  assert.equal(payment.orderId, letteredOrderId);
+});
+
+test("rejects wallet payment responses with invalid status, provider or reused flag", async () => {
+  const invalidResponses = [
+    { orderId: ORDER_ID, status: "pending", provider: "wallet", balanceMinor: "300", reused: false },
+    { orderId: ORDER_ID, status: "paid", provider: "stripe", balanceMinor: "300", reused: false },
+    { orderId: ORDER_ID, status: "paid", provider: "wallet", balanceMinor: "300", reused: "true" }
+  ];
+  for (const data of invalidResponses) {
+    const client = createCoreCommerceClient({
+      coreOrigin: "https://core.example",
+      fetchImpl: async () => response(data)
+    });
+    await assert.rejects(client.payOrderWithWallet({ playerToken: "player-token", orderId: ORDER_ID }));
+  }
+});
