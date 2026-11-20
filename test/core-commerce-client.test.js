@@ -389,3 +389,192 @@ test("rejects a live Stripe checkout session ID even when the URL host is truste
     idempotencyKey: "checkout-request-001"
   }), /Stripe test checkout session/);
 });
+
+
+test("lists authenticated wallet balances and preserves exact minor-unit strings", async () => {
+  let captured;
+  const client = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async (url, options) => {
+      captured = { url, options };
+      return response([
+        { currencyCode: "ATK", balanceMinor: "9007199254740993", lastActivityAt: "2026-11-19T12:00:00.000Z" },
+        { currencyCode: "USD", balanceMinor: "0", lastActivityAt: null }
+      ]);
+    }
+  });
+
+  const wallets = await client.listWallets({ playerToken: "player-session-token" });
+  assert.equal(captured.url, "https://core.example/account/wallets");
+  assert.equal(captured.options.method, "GET");
+  assert.equal(captured.options.headers.authorization, "Bearer player-session-token");
+  assert.equal(wallets[0].currencyCode, "ATK");
+  assert.equal(wallets[0].balanceMinor, "9007199254740993");
+  assert.equal(wallets[1].lastActivityAt, null);
+  assert.equal(Object.isFrozen(wallets), true);
+  assert.equal(Object.isFrozen(wallets[0]), true);
+});
+
+test("requires player credentials and rejects malformed wallet balances", async () => {
+  let calls = 0;
+  const client = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async () => { calls += 1; return response([]); }
+  });
+  await assert.rejects(client.listWallets(), /playerToken must be a non-empty string/);
+
+  for (const wallet of [
+    { currencyCode: "US", balanceMinor: "10", lastActivityAt: null },
+    { currencyCode: "USD", balanceMinor: "-1", lastActivityAt: null },
+    { currencyCode: "USD", balanceMinor: "10", lastActivityAt: "not-a-date" }
+  ]) {
+    const malformed = createCoreCommerceClient({
+      coreOrigin: "https://core.example",
+      fetchImpl: async () => response([wallet])
+    });
+    await assert.rejects(malformed.listWallets({ playerToken: "player-token" }));
+  }
+  assert.equal(calls, 0);
+});
+
+test("lists wallet ledger entries with a bounded limit and authenticated player token", async () => {
+  let captured;
+  const client = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async (url, options) => {
+      captured = { url, options };
+      return response([{
+        id: "66666666-6666-4666-8666-666666666666",
+        entryType: "credit",
+        amountMinor: "9007199254740993",
+        referenceType: "payment",
+        referenceId: "payment-123",
+        createdAt: "2026-11-19T12:00:00.000Z"
+      }]);
+    }
+  });
+
+  const entries = await client.listWalletLedger({
+    playerToken: "player-session-token",
+    currencyCode: "atk",
+    limit: 10
+  });
+  assert.equal(captured.url, "https://core.example/account/wallets/ATK/ledger?limit=10");
+  assert.equal(captured.options.method, "GET");
+  assert.equal(captured.options.headers.authorization, "Bearer player-session-token");
+  assert.equal(entries[0].amountMinor, "9007199254740993");
+  assert.equal(entries[0].entryType, "credit");
+  assert.equal(Object.isFrozen(entries[0]), true);
+});
+
+test("rejects invalid wallet ledger currency, limit, entry type and amount before trusting the response", async () => {
+  let calls = 0;
+  const client = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async () => { calls += 1; return response([]); }
+  });
+  await assert.rejects(client.listWalletLedger({ playerToken: "player-token", currencyCode: "AT", limit: 10 }), /three-letter code/);
+  await assert.rejects(client.listWalletLedger({ playerToken: "player-token", currencyCode: "ATK", limit: 101 }), /between 1 and 100/);
+  assert.equal(calls, 0);
+
+  for (const entry of [
+    { id: "66666666-6666-4666-8666-666666666666", entryType: "transfer", amountMinor: "10", referenceType: "order", referenceId: "x", createdAt: "2026-11-19T12:00:00.000Z" },
+    { id: "66666666-6666-4666-8666-666666666666", entryType: "debit", amountMinor: "0", referenceType: "order", referenceId: "x", createdAt: "2026-11-19T12:00:00.000Z" },
+    { id: "66666666-6666-4666-8666-666666666666", entryType: "debit", amountMinor: "10", referenceType: "order", referenceId: "x", createdAt: "invalid-date" }
+  ]) {
+    const malformed = createCoreCommerceClient({
+      coreOrigin: "https://core.example",
+      fetchImpl: async () => response([entry])
+    });
+    await assert.rejects(malformed.listWalletLedger({ playerToken: "player-token", currencyCode: "ATK" }));
+  }
+});
+
+test("pays a pending order from the authenticated wallet without sending client-supplied amounts", async () => {
+  let captured;
+  const client = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async (url, options) => {
+      captured = { url, options };
+      return response({ orderId: ORDER_ID, status: "paid", provider: "wallet", balanceMinor: "300", reused: false }, { status: 201 });
+    }
+  });
+
+  const payment = await client.payOrderWithWallet({ playerToken: "player-session-token", orderId: ORDER_ID });
+  assert.equal(captured.url, "https://core.example/commerce/orders/" + ORDER_ID + "/pay-with-wallet");
+  assert.equal(captured.options.method, "POST");
+  assert.equal(captured.options.headers.authorization, "Bearer player-session-token");
+  assert.equal(captured.options.body, undefined);
+  assert.equal(captured.options.headers["idempotency-key"], undefined);
+  assert.equal(payment.status, "paid");
+  assert.equal(payment.provider, "wallet");
+  assert.equal(payment.balanceMinor, "300");
+  assert.equal(payment.reused, false);
+  assert.equal(Object.isFrozen(payment), true);
+});
+
+test("validates wallet payment order identity and reused response", async () => {
+  const mismatched = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async () => response({ orderId: ENTITLEMENT_ID, status: "paid", provider: "wallet", balanceMinor: "300", reused: true })
+  });
+  await assert.rejects(mismatched.payOrderWithWallet({ playerToken: "player-token", orderId: ORDER_ID }), /different order ID/);
+
+  const reused = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async () => response({ orderId: ORDER_ID, status: "paid", provider: "wallet", balanceMinor: "300", reused: true })
+  });
+  assert.equal((await reused.payOrderWithWallet({ playerToken: "player-token", orderId: ORDER_ID })).reused, true);
+});
+
+test("surfaces insufficient wallet balance as a typed Core commerce error", async () => {
+  const client = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async () => response(null, {
+      ok: false,
+      status: 409,
+      body: { error: { code: "INSUFFICIENT_WALLET_BALANCE", message: "The wallet balance is not sufficient for this order." } }
+    })
+  });
+  await assert.rejects(client.payOrderWithWallet({ playerToken: "player-token", orderId: ORDER_ID }), (error) => {
+    assert.equal(error.name, "CoreCommerceRequestError");
+    assert.equal(error.status, 409);
+    assert.equal(error.code, "INSUFFICIENT_WALLET_BALANCE");
+    return true;
+  });
+});
+
+
+test("accepts UUID case differences when matching the wallet payment response", async () => {
+  const letteredOrderId = "abcdef12-3456-4abc-8def-abcdef123456";
+  const client = createCoreCommerceClient({
+    coreOrigin: "https://core.example",
+    fetchImpl: async () => response({
+      orderId: letteredOrderId,
+      status: "paid",
+      provider: "wallet",
+      balanceMinor: "300",
+      reused: false
+    })
+  });
+  const payment = await client.payOrderWithWallet({
+    playerToken: "player-token",
+    orderId: letteredOrderId.toUpperCase()
+  });
+  assert.equal(payment.orderId, letteredOrderId);
+});
+
+test("rejects wallet payment responses with invalid status, provider or reused flag", async () => {
+  const invalidResponses = [
+    { orderId: ORDER_ID, status: "pending", provider: "wallet", balanceMinor: "300", reused: false },
+    { orderId: ORDER_ID, status: "paid", provider: "stripe", balanceMinor: "300", reused: false },
+    { orderId: ORDER_ID, status: "paid", provider: "wallet", balanceMinor: "300", reused: "true" }
+  ];
+  for (const data of invalidResponses) {
+    const client = createCoreCommerceClient({
+      coreOrigin: "https://core.example",
+      fetchImpl: async () => response(data)
+    });
+    await assert.rejects(client.payOrderWithWallet({ playerToken: "player-token", orderId: ORDER_ID }));
+  }
+});

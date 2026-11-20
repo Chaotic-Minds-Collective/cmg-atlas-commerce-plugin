@@ -7,6 +7,9 @@ A Chaotic Minds Gaming-branded multi-grid economy and shop built on Chaotic Mind
 - `listProducts({ currency })` reads Core's public, active product catalogue.
 - `listEntitlements({ playerToken })` reads the authenticated player's entitlements and delivery targets.
 - `listOrders({ playerToken })` reads the authenticated player's order history.
+- `listWallets({ playerToken })` reads the authenticated player's wallet balances from Core's append-only ledger.
+- `listWalletLedger({ playerToken, currencyCode, limit })` reads up to 100 recent entries for one wallet; minor-unit amounts remain decimal strings.
+- `payOrderWithWallet({ playerToken, orderId })` asks Core to atomically pay an eligible pending order from the matching wallet. The order ID is the idempotency boundary; the client never supplies an amount.
 - `createOrder({ playerToken, idempotencyKey, currency, items })` creates an idempotent Core order from 1–20 product lines, with quantities limited to 1–10.
 - `getCheckoutStatus()` reports whether Core's Stripe **test-mode** checkout is enabled.
 - `createCheckoutSession({ playerToken, orderId, idempotencyKey })` asks Core to create or reuse a hosted Stripe test checkout session. The client accepts only HTTPS URLs on `checkout.stripe.com`.
@@ -17,8 +20,8 @@ A Chaotic Minds Gaming-branded multi-grid economy and shop built on Chaotic Mind
 
 ## Explicitly not implemented yet
 
-- **Wallet balance/read/spend/transfer APIs:** Core's commerce schema contains wallet and ledger tables, but Core does not yet expose a wallet-balance or wallet-ledger endpoint. This module does not invent one or query Core's database directly.
-- **Virtual-currency checkout:** order creation and Stripe test checkout are available through Core, but an atomic wallet debit-and-purchase flow is not yet implemented.
+- **Manual wallet adjustments and player-to-player transfers:** Core exposes authenticated wallet balances, ledger history and atomic wallet-funded order payment. It does not expose arbitrary manual adjustments or player-to-player transfers; define their authorization and audit semantics before adding them.
+- **Currency-pack wallet checkout:** wallet-funded payment is available for eligible non-currency-pack orders. Currency packs must use the configured external payment provider and cannot be purchased with the wallet they replenish.
 - **Actual game delivery:** Core can queue entitlement deliveries and exposes lease/acknowledgement contracts, but a running delivery worker and verified native item-grant adapter are still required. The client never grants items itself.
 - Production/live payment processing, refunds, and production payment credentials. Core currently accepts only Stripe test-mode checkout events; no live payment mode is enabled by this client.
 - The full legacy Atlas Shop catalogue parity: kits, sell/trade, creature and ship purchases, beacon/artifact crates, XP, engram actions, timed rewards, and admin controls are tracked in [ATLAS Shop feature parity](docs/ATLAS_SHOP_FEATURE_PARITY.md).
@@ -41,6 +44,6 @@ npm run check
 npm test
 ```
 
-The tests use a fake Fetch implementation; they do not call a live Core instance or Stripe. The current suite contains 19 tests.
+The tests use a fake Fetch implementation; they do not call a live Core instance or Stripe. The current suite contains 28 tests.
 
 See [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) for delivery gates.

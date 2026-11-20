@@ -269,6 +269,63 @@ function validateEntitlementClaim(data, requestedEntitlementId) {
   });
 }
 
+function validateWallet(item, index) {
+  const field = "wallets[" + index + "]";
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    throw new TypeError(field + " must be an object");
+  }
+  if (item.lastActivityAt !== null &&
+      (typeof item.lastActivityAt !== "string" || Number.isNaN(Date.parse(item.lastActivityAt)))) {
+    throw new TypeError(field + ".lastActivityAt must be a valid date string or null");
+  }
+  return deepFreeze({
+    currencyCode: validateCurrency(item.currencyCode),
+    balanceMinor: validateMinorAmount(item.balanceMinor, field + ".balanceMinor"),
+    lastActivityAt: item.lastActivityAt
+  });
+}
+
+function validateWalletLedgerEntry(item, index) {
+  const field = "walletLedger[" + index + "]";
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    throw new TypeError(field + " must be an object");
+  }
+  const entryType = requiredString(item.entryType, field + ".entryType");
+  if (!["credit", "debit", "refund", "adjustment"].includes(entryType)) {
+    throw new TypeError(field + ".entryType is not a supported wallet ledger type");
+  }
+  const amountMinor = validateMinorAmount(item.amountMinor, field + ".amountMinor");
+  if (BigInt(amountMinor) <= 0n) throw new TypeError(field + ".amountMinor must be positive");
+  const createdAt = requiredString(item.createdAt, field + ".createdAt");
+  if (Number.isNaN(Date.parse(createdAt))) throw new TypeError(field + ".createdAt must be a valid date string");
+  return deepFreeze({
+    id: validateUuid(item.id, field + ".id"),
+    entryType,
+    amountMinor,
+    referenceType: requiredString(item.referenceType, field + ".referenceType"),
+    referenceId: requiredString(item.referenceId, field + ".referenceId"),
+    createdAt
+  });
+}
+
+function validateWalletPayment(data, requestedOrderId) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new TypeError("Core wallet payment data must be an object");
+  }
+  const orderId = validateUuid(data.orderId, "orderId");
+  if (orderId.toLowerCase() !== requestedOrderId.toLowerCase()) throw new TypeError("Core wallet payment returned a different order ID");
+  if (data.status !== "paid") throw new TypeError("Core wallet payment status must be paid");
+  if (data.provider !== "wallet") throw new TypeError("Core wallet payment provider must be wallet");
+  if (typeof data.reused !== "boolean") throw new TypeError("Core wallet payment reused flag must be a boolean");
+  return deepFreeze({
+    orderId,
+    status: data.status,
+    provider: data.provider,
+    balanceMinor: validateMinorAmount(data.balanceMinor, "balanceMinor"),
+    reused: data.reused
+  });
+}
+
 async function readResponse(response, operation) {
   if (!response || typeof response !== "object" ||
       typeof response.ok !== "boolean" || typeof response.status !== "number") {
@@ -301,9 +358,9 @@ async function readResponse(response, operation) {
 }
 
 /**
- * Create a player-facing client for Core's catalogue, account views, order creation,
- * test-mode checkout, and entitlement delivery claims. Player credentials are supplied
- * per call and are never retained. Core remains authoritative for payments and rewards.
+ * Create a player-facing client for Core wallets, ledger history, catalogue, account views,
+ * order creation, wallet-funded payments, test-mode checkout, and entitlement claims.
+ * Player credentials are supplied per call and are never retained. Core remains authoritative.
  */
 export function createCoreCommerceClient({
   coreOrigin,
@@ -341,6 +398,37 @@ export function createCoreCommerceClient({
       throw failure;
     }
     return readResponse(response, operation);
+  }
+
+  async function listWallets({ playerToken } = {}) {
+    requiredString(playerToken, "playerToken");
+    const data = await request("/account/wallets", { playerToken, operation: "wallet list" });
+    if (!Array.isArray(data)) throw new TypeError("Core wallet data must be an array");
+    return Object.freeze(data.map(validateWallet));
+  }
+
+  async function listWalletLedger({ playerToken, currencyCode, limit = 50 } = {}) {
+    requiredString(playerToken, "playerToken");
+    const currency = validateCurrency(currencyCode);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new RangeError("limit must be an integer between 1 and 100");
+    }
+    const url = new URL("/account/wallets/" + encodeURIComponent(currency) + "/ledger", origin);
+    url.searchParams.set("limit", String(limit));
+    const data = await request(url.pathname + url.search, { playerToken, operation: "wallet ledger" });
+    if (!Array.isArray(data)) throw new TypeError("Core wallet ledger data must be an array");
+    return Object.freeze(data.map(validateWalletLedgerEntry));
+  }
+
+  async function payOrderWithWallet({ playerToken, orderId } = {}) {
+    requiredString(playerToken, "playerToken");
+    const normalizedOrderId = validateUuid(orderId, "orderId");
+    const data = await request("/commerce/orders/" + encodeURIComponent(normalizedOrderId) + "/pay-with-wallet", {
+      playerToken,
+      method: "POST",
+      operation: "wallet payment"
+    });
+    return validateWalletPayment(data, normalizedOrderId);
   }
 
   async function listProducts({ currency = "USD" } = {}) {
@@ -411,6 +499,9 @@ export function createCoreCommerceClient({
   }
 
   return Object.freeze({
+    listWallets,
+    listWalletLedger,
+    payOrderWithWallet,
     listProducts,
     listEntitlements,
     listOrders,

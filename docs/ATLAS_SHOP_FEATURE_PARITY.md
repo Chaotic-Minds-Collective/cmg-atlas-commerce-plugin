@@ -10,7 +10,7 @@ The sample configuration contains database credentials (`apitest` / `12345`). Th
 
 | Legacy capability | Evidence in the archived configuration | Replacement direction |
 |---|---|---|
-| Points/currency and balances | Timed points rewards, points display, insufficient-balance messages | Core wallet and immutable ledger; Commerce displays the Core balance through a documented API |
+| Points/currency and balances | Timed points rewards, points display, insufficient-balance messages | Core wallet and immutable ledger; Commerce exposes authenticated balance/ledger reads and wallet-funded order payment |
 | Timed currency rewards | Configurable interval and reward groups such as Default and Premiums | Core reward source with group/entitlement policy, durable schedule and idempotent credit |
 | Kits | Item and creature bundles; price, default claim amount, permissions, spawn-only rule, level limits and creature flags | Commerce kit catalogue plus Core entitlement; typed item/creature delivery mappings |
 | Item shop and bundles | Item products with blueprint paths, quantity, quality and optional blueprint delivery | Validated item catalogue; blueprint registry and adapter grant contract |
@@ -28,7 +28,7 @@ The sample configuration contains database credentials (`apitest` / `12345`). Th
 ## Improvements over the legacy design
 
 1. **Cluster-wide wallet:** one authoritative Core ledger across grids; no per-server point stores or independent MySQL copies.
-2. **Atomic purchase:** wallet debit, order state and entitlement creation commit together. A retry cannot double-charge or double-grant.
+2. **Atomic purchase:** for eligible non-currency-pack orders, Core commits the wallet debit, wallet payment transaction, paid order transition, entitlement/reward fulfillment, event-outbox entry and audit record in one transaction. A retry cannot double-charge or double-grant.
 3. **Idempotent delivery:** stable delivery keys, durable queue leases, retry limits and reconciliation after disconnects or server restarts.
 4. **Typed actions only:** product configuration cannot run arbitrary RCON or console commands. Every action type is explicitly registered and validated.
 5. **Blueprint validation:** reject unknown, malformed or unsupported item, creature, ship, hull, beacon and engram identifiers before purchase or delivery.
@@ -40,9 +40,9 @@ The sample configuration contains database credentials (`apitest` / `12345`). Th
 
 ## Delivery sequence
 
-1. Expose and test the Core-backed order/checkout/claim client contract.
-2. Add documented Core wallet balance, ledger, credit, debit and transfer APIs. Define adjustment semantics before enabling admin adjustments.
-3. Implement atomic wallet-funded purchases and transaction history.
+1. Expose and test the Core-backed order/checkout/claim/wallet client contract.
+2. [x] Implement authenticated wallet balance and ledger reads plus atomic wallet-funded order payment for eligible products.
+3. Define authorization, audit and idempotency semantics before adding manual wallet adjustments or player-to-player transfers.
 4. Build item and kit products first, with isolated adapter grants and delivery acknowledgement.
 5. Add creature, sell/trade, beacon/artifact, XP, engram and ship/hull actions in separately tested capability slices.
 6. Add timed/playtime/vote/daily/event rewards, refund/revocation and reconciliation.
@@ -50,7 +50,8 @@ The sample configuration contains database credentials (`apitest` / `12345`). Th
 
 ## Current blockers
 
-- Core has wallet and ledger tables but no public wallet balance or spend API.
-- Core can create orders, create Stripe **test-mode** checkout sessions and queue entitlement claims; it does not currently provide a wallet-funded purchase flow.
+- Core exposes authenticated wallet balance and ledger endpoints and an atomic wallet-funded order payment endpoint. The Commerce client now exposes these operations through validated per-request player credentials.
+- Wallet-funded orders require a configured currency, sufficient balance and no active/successful external payment attempt. Currency packs remain external-payment-only.
+- Manual wallet adjustments and player-to-player transfers are not implemented; define their permissions and audit semantics before adding them.
 - Core reward queue lease/acknowledgement endpoints exist, but a running delivery worker and confirmed native ATLAS grant implementation are not yet available.
 - Native adapter CI compilation is not proof of live server ABI compatibility. Item delivery remains disabled until an isolated server test passes.
